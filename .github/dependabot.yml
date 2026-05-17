@@ -1,0 +1,122 @@
+# Caio Cockpit — Dependabot config
+#
+# Policy: SECURITY-ONLY weekly. Routine version-update PRs are disabled via
+# `open-pull-requests-limit: 0` (the documented way to suppress routine bumps
+# while keeping security advisory PRs flowing — those come from the GitHub
+# Advisory Database and are independent of this limit).
+#
+# Stability rationale: this fork must stay quiet through the TSE 2026 window
+# (Brazilian election Oct 2026). Routine bumps create review/merge churn we
+# can't afford. Security PRs still appear automatically when CVEs are filed.
+#
+# Pre-requisites enforced separately on the repo (not in this file):
+#   - Dependabot alerts: ENABLED
+#   - Dependabot security updates: ENABLED
+# Verify via:  gh api repos/pedrosbraga/caio-cockpit/vulnerability-alerts
+#
+# Follow-up (V1.2 hardening, not blocking V1.1):
+#   - Pin GitHub Actions by full SHA (workflows currently use @vN tags)
+#   - Pin Docker base images by sha256 digest (postgres:16-alpine, etc)
+#   - Add Trivy/Grype to CI for container CVE scanning
+
+version: 2
+updates:
+
+  # Backend Python (FastAPI + SQLAlchemy + uv-managed)
+  - package-ecosystem: "uv"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 0
+    labels:
+      - "dependencies"
+      - "backend"
+    commit-message:
+      prefix: "deps(backend)"
+      include: "scope"
+
+  # Frontend Node.js (Next.js 16 + React 19 + Radix)
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 0
+    labels:
+      - "dependencies"
+      - "frontend"
+    commit-message:
+      prefix: "deps(frontend)"
+      include: "scope"
+
+  # GitHub Actions workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 0
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "deps(ci)"
+      include: "scope"
+
+  # Backend Dockerfile base image
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 0
+    labels:
+      - "dependencies"
+      - "docker"
+      - "backend"
+    commit-message:
+      prefix: "deps(docker)"
+      include: "scope"
+
+  # Frontend Dockerfile base image
+  - package-ecosystem: "docker"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 0
+    labels:
+      - "dependencies"
+      - "docker"
+      - "frontend"
+    commit-message:
+      prefix: "deps(docker)"
+      include: "scope"
+
+  # Docker Compose images (postgres:16-alpine, redis:7-alpine)
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 0
+    labels:
+      - "dependencies"
+      - "docker"
+      - "compose"
+    commit-message:
+      prefix: "deps(compose)"
+      include: "scope"
