@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     # OpenClaw gateway runtime compatibility
     gateway_min_version: str = "2026.02.9"
 
+    # Caio operational data bridges (read-only)
+    # Path inside the container where ~/.openclaw/state is bind-mounted.
+    # Empty string disables all Caio bridges (and the /api/v1/caio/* endpoints
+    # degrade gracefully with status="disabled").
+    caio_state_dir: str = ""
+    caio_bridge_events_enabled: bool = True
+    caio_bridge_timeout_s: float = 2.0
+
     # Logging
     log_level: str = "INFO"
     log_format: str = "text"
