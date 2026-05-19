@@ -256,3 +256,126 @@ class EventsSqliteReader(BridgeBase):
             return await asyncio.to_thread(self._sync_recent_events, bounded_limit, types)
 
         return await self.safe_read(_q)
+
+
+class CritiquesSqliteReader(BridgeBase):
+    """Reads Caio's Reflexion-loop critiques from ``critiques.sqlite``.
+
+    The Reflexion loop runs weekly (cron ``ai.openclaw.reflexion``, Sundays
+    18:00 SP) and self-reviews a window of past WhatsApp approvals (replaced /
+    rejected / manual_override). For each action it emits a structured
+    critique: what Caio's suggestion missed (``miss``), what Pedro did better
+    in the actual response (``hit``), the generalizable rule that closes the
+    gap (``pattern``), plus a self-rated ``confidence`` 0-1.
+
+    This bridge surfaces those critiques to the Cockpit so Pedro can see
+    "Caio aprendendo" — patterns growing over time. It is read-only: patterns
+    are insight, not actionable decisions, so there is no mark_only on top.
+
+    ``raw_llm_response`` is **never** returned: that column is the raw LLM
+    output Caio's reflexion-tick.sh persists for forensic replay and may be
+    large; the curated fields above are everything the UI needs.
+    """
+
+    name = "critiques_sqlite"
+
+    def __init__(
+        self,
+        *,
+        db_path: Path,
+        enabled: bool,
+        timeout_s: float | None = None,
+    ) -> None:
+        super().__init__(enabled=enabled, timeout_s=timeout_s)
+        # Defense-in-depth: resolve to abs path so the URI we hand SQLite has no
+        # ".." segments. The bind mount is :ro at the docker layer.
+        self._db_path = db_path.expanduser().resolve(strict=False)
+
+    @property
+    def db_path(self) -> Path:
+        return self._db_path
+
+    def _build_uri(self) -> str:
+        # Strict read-only URI **plus** ``immutable=1``. Why immutable here but
+        # not in EventsSqliteReader: events.sqlite is journal_mode=WAL (carries
+        # -wal/-shm sidecars), so ``mode=ro`` is enough — SQLite uses the WAL
+        # as the consistency anchor without ever needing to write a journal.
+        # critiques.sqlite is journal_mode=DELETE (default rollback journal),
+        # which forces SQLite to *probe* for a hot journal on open; on a Docker
+        # ``:ro`` bind mount that probe trips EROFS and SQLite surfaces it as
+        # "unable to open database file". ``immutable=1`` skips the probe.
+        # Trade-off: the connection assumes the file does not change while open
+        # — fine here because Caio's reflexion-tick.sh writes once a week and
+        # each Cockpit request opens its own short-lived connection.
+        return f"file:{self._db_path.as_posix()}?mode=ro&immutable=1"
+
+    def _open_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(
+            self._build_uri(),
+            uri=True,
+            timeout=self.timeout_s,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {int(self.timeout_s * 1000)}")
+        return conn
+
+    def _sync_recent_critiques(
+        self,
+        limit: int,
+        since_iso: str | None,
+    ) -> list[dict[str, Any]]:
+        if not self._db_path.exists():
+            raise sqlite3.OperationalError(
+                f"critiques DB not found: {self._db_path}"
+            )
+        params: list[Any] = []
+        where_clause = ""
+        if since_iso:
+            where_clause = "WHERE generated_at >= ?"
+            params.append(since_iso)
+        query = (
+            "SELECT id, generated_at, approval_log_id, jid, action, "
+            "contact_message, caio_suggestion, final_response, "
+            "miss, hit, pattern, confidence "
+            f"FROM critiques {where_clause} "
+            "ORDER BY generated_at DESC "
+            "LIMIT ?"
+        )
+        params.append(limit)
+        with self._open_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "generated_at": row["generated_at"],
+                "approval_log_id": row["approval_log_id"],
+                "jid": row["jid"],
+                "action": row["action"],
+                "contact_message": row["contact_message"],
+                "caio_suggestion": row["caio_suggestion"],
+                "final_response": row["final_response"],
+                "miss": row["miss"],
+                "hit": row["hit"],
+                "pattern": row["pattern"],
+                "confidence": row["confidence"],
+            }
+            for row in rows
+        ]
+
+    async def recent_critiques(
+        self,
+        *,
+        limit: int = 50,
+        since_iso: str | None = None,
+    ) -> BridgeResult:
+        """Return the latest critiques as a ``BridgeResult`` (never raises)."""
+        bounded_limit = max(1, min(int(limit), 500))
+
+        async def _q() -> list[dict[str, Any]]:
+            return await asyncio.to_thread(
+                self._sync_recent_critiques, bounded_limit, since_iso
+            )
+
+        return await self.safe_read(_q)

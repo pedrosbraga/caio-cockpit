@@ -8,8 +8,10 @@ V3 Postgres, or the OpenClaw gateway.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
@@ -22,13 +24,16 @@ from app.core.logging import get_logger
 from app.db.session import get_session
 from app.models.caio_decisions import CaioEventDecision
 from app.schemas.caio import (
+    CaioCritiqueItem,
+    CaioCritiquesWindow,
     CaioDecisionRequest,
     CaioDecisionResponse,
     CaioEventDecisionRead,
     CaioEventItem,
+    CaioRecentCritiquesResponse,
     CaioRecentEventsResponse,
 )
-from app.services.caio_bridge import EventsSqliteReader
+from app.services.caio_bridge import CritiquesSqliteReader, EventsSqliteReader
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/caio", tags=["caio"])
@@ -50,6 +55,26 @@ def _events_reader() -> EventsSqliteReader:
         enabled=enabled,
         timeout_s=settings.caio_bridge_timeout_s,
     )
+
+
+@lru_cache(maxsize=1)
+def _critiques_reader() -> CritiquesSqliteReader:
+    state_dir = settings.caio_state_dir.strip()
+    enabled = settings.caio_bridge_critiques_enabled and bool(state_dir)
+    db_path = (
+        Path(state_dir) / "critiques.sqlite"
+        if state_dir
+        else Path("/dev/null/critiques.sqlite")
+    )
+    return CritiquesSqliteReader(
+        db_path=db_path,
+        enabled=enabled,
+        timeout_s=settings.caio_bridge_timeout_s,
+    )
+
+
+SINCE_DAYS_QUERY = Query(default=30, ge=1, le=365)
+CRITIQUES_LIMIT_QUERY = Query(default=50, ge=1, le=500)
 
 
 async def _load_decisions(
@@ -223,4 +248,46 @@ async def mark_think_loop_decision(
         decided_at=row.decided_at,
         decided_by_user_id=row.decided_by_user_id,
         note=row.note,
+    )
+
+
+@router.get(
+    "/reflexion/critiques",
+    response_model=CaioRecentCritiquesResponse,
+    summary="Caio Reflexion-loop critiques (read-only)",
+    description=(
+        "Returns Caio's Reflexion-loop critiques — the weekly self-review of "
+        "past WhatsApp approvals (replaced / rejected / manual_override). Each "
+        "item carries Caio's **miss** (what his suggestion got wrong), Pedro's "
+        "**hit** (what he did better in the real response), the **pattern** "
+        "Caio extracted, and Caio's self-rated confidence (0-1). This endpoint "
+        "is **read-only**: there is no decision to record because patterns are "
+        "insight, not actionable verdicts. Window defaults to the last 30 days "
+        "so the UI keeps something to show between weekly Reflexion runs "
+        "(Sundays 18:00 SP)."
+    ),
+)
+async def reflexion_critiques(
+    since_days: int = SINCE_DAYS_QUERY,
+    limit: int = CRITIQUES_LIMIT_QUERY,
+    _auth: AuthContext = AUTH_CONTEXT_DEP,
+) -> CaioRecentCritiquesResponse:
+    reader = _critiques_reader()
+    since = datetime.now(tz=timezone.utc) - timedelta(days=since_days)
+    since_iso = since.isoformat()
+    result = await reader.recent_critiques(limit=limit, since_iso=since_iso)
+    raw_items: list[dict[str, Any]] = (
+        list(result.data) if result.status == "ok" and result.data else []
+    )
+    items = [CaioCritiqueItem(**item) for item in raw_items]
+    return CaioRecentCritiquesResponse(
+        status=result.status,
+        error_class=result.error_class,
+        latency_ms=result.latency_ms,
+        items=items,
+        window=CaioCritiquesWindow(
+            since_days=since_days,
+            since_iso=since_iso,
+            total_returned=len(items),
+        ),
     )

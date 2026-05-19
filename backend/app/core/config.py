@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     # degrade gracefully with status="disabled").
     caio_state_dir: str = ""
     caio_bridge_events_enabled: bool = True
+    caio_bridge_critiques_enabled: bool = True
     caio_bridge_timeout_s: float = 2.0
 
     # V1.1 Cockpit approve/reject mode. Hard-locked to "mark_only": writing a

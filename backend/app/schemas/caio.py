@@ -75,3 +75,62 @@ class CaioDecisionResponse(BaseModel):
     # Sanity flag for the UI: confirms the server is in mark_only mode and
     # nothing downstream was dispatched.
     mode: Literal["mark_only"] = "mark_only"
+
+
+class CaioCritiqueItem(BaseModel):
+    """A single Reflexion-loop critique from ``critiques.sqlite``.
+
+    ``action`` is kept as a free ``str`` (not a ``Literal``) so the schema does
+    not have to be redeployed if reflexion-tick.sh starts emitting new action
+    labels. ``raw_llm_response`` is intentionally omitted: forensic-only column
+    that may carry MB of LLM debug output.
+    """
+
+    id: int
+    generated_at: str = Field(description="ISO-8601 timestamp from the reflexion run.")
+    approval_log_id: int
+    jid: str | None = None
+    action: str = Field(
+        description="Caio's classification of the action under review "
+        "(e.g. ``replaced``, ``rejected``, ``manual_override``)."
+    )
+    contact_message: str | None = None
+    caio_suggestion: str | None = None
+    final_response: str | None = None
+    miss: str | None = Field(
+        default=None,
+        description="What Caio's suggestion got wrong, in his own words.",
+    )
+    hit: str | None = Field(
+        default=None,
+        description="What Pedro did better in the actual response.",
+    )
+    pattern: str | None = Field(
+        default=None,
+        description="Generalizable rule Caio extracted from the miss/hit gap.",
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="Caio's self-rated confidence in the pattern (0-1).",
+    )
+
+
+class CaioCritiquesWindow(BaseModel):
+    """Diagnostic info on the time window the response covers."""
+
+    since_days: int
+    since_iso: str | None = None
+    total_returned: int
+
+
+class CaioRecentCritiquesResponse(BaseModel):
+    """Response envelope: bridge status + items + window diagnostics."""
+
+    status: CaioBridgeStatus
+    error_class: str | None = Field(
+        default=None,
+        description="Set only when ``status`` is ``error`` or ``timeout``.",
+    )
+    latency_ms: int = 0
+    items: list[CaioCritiqueItem] = Field(default_factory=list)
+    window: CaioCritiquesWindow
