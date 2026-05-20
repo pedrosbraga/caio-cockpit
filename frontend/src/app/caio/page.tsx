@@ -141,28 +141,194 @@ function formatOccurredAt(iso: string): string {
   });
 }
 
-function formatPayloadSummary(item: CaioEventItem): string {
-  const payload = item.payload;
-  if (!payload || typeof payload !== "object") {
-    return "(no payload)";
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value ? value : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function formatCertainty(value: unknown): string | null {
+  const n = asNumber(value);
+  return n === null ? null : `${Math.round(n * 100)}%`;
+}
+
+type RenderedSummary = {
+  /** Short human title — what this event *is*. */
+  title: string;
+  /** The free-form body Pedro reads to decide. */
+  body: string;
+  /** Optional inline badges shown next to the event type badge. */
+  badges: { label: string; tone: string }[];
+};
+
+function renderSummary(item: CaioEventItem): RenderedSummary {
+  const payload = (item.payload ?? {}) as Record<string, unknown>;
+  const badges: { label: string; tone: string }[] = [];
+
+  if (item.event_type === "think_loop.proposal") {
+    const action = asString(payload.action) ?? "(proposta sem texto)";
+    const actionType = asString(payload.action_type);
+    const rationale = asString(payload.rationale);
+    const certainty = formatCertainty(payload.certainty);
+    const mode = asString(payload.mode);
+    const requiresInput = asBoolean(payload.requires_pedro_input);
+
+    if (actionType) {
+      badges.push({
+        label: actionType,
+        tone: "bg-indigo-50 text-indigo-700 border border-indigo-200",
+      });
+    }
+    if (certainty) {
+      badges.push({
+        label: `conf ${certainty}`,
+        tone: "bg-slate-50 text-slate-700 border border-slate-200",
+      });
+    }
+    if (mode) {
+      badges.push({
+        label: `mode ${mode}`,
+        tone: mode === "shadow"
+          ? "bg-slate-50 text-slate-600 border border-slate-200"
+          : "bg-emerald-50 text-emerald-700 border border-emerald-200",
+      });
+    }
+    if (requiresInput) {
+      badges.push({
+        label: "precisa Pedro",
+        tone: "bg-amber-50 text-amber-800 border border-amber-200",
+      });
+    }
+    return {
+      title: "Proposta do Caio (Think Loop)",
+      body: rationale ? `${action}\n\nRationale: ${rationale}` : action,
+      badges,
+    };
   }
-  if (typeof payload.action === "string" && payload.action) {
-    return payload.action as string;
+
+  if (item.event_type === "think_loop.policy_decision") {
+    const actionType = asString(payload.action_type) ?? "?";
+    const level = asString(payload.level);
+    const mode = asString(payload.mode);
+    const allowed = asBoolean(payload.allowed);
+    const certainty = formatCertainty(payload.certainty);
+    const requiresApproval = asBoolean(payload.requires_approval);
+    const hardRule = asString(payload.hard_rule_triggered);
+
+    if (level) {
+      badges.push({
+        label: level,
+        tone: "bg-amber-50 text-amber-800 border border-amber-200",
+      });
+    }
+    if (mode) {
+      badges.push({
+        label: `mode ${mode}`,
+        tone: mode === "shadow"
+          ? "bg-slate-50 text-slate-600 border border-slate-200"
+          : "bg-emerald-50 text-emerald-700 border border-emerald-200",
+      });
+    }
+    if (certainty) {
+      badges.push({
+        label: `conf ${certainty}`,
+        tone: "bg-slate-50 text-slate-700 border border-slate-200",
+      });
+    }
+    badges.push({
+      label: allowed ? "allowed" : "blocked",
+      tone: allowed
+        ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+        : "bg-rose-50 text-rose-700 border border-rose-200",
+    });
+    if (requiresApproval) {
+      badges.push({
+        label: "requer aprovação",
+        tone: "bg-amber-50 text-amber-800 border border-amber-200",
+      });
+    }
+    if (hardRule) {
+      badges.push({
+        label: `regra: ${hardRule}`,
+        tone: "bg-rose-50 text-rose-700 border border-rose-200",
+      });
+    }
+    return {
+      title: "Decisão de política (Think Loop)",
+      body:
+        `Caio classificou a proposta como '${actionType}' e a política decidiu ` +
+        `${allowed ? "permitir" : "bloquear"}` +
+        `${level ? ` no nível ${level}` : ""}` +
+        `${mode ? `, modo ${mode}` : ""}` +
+        `${requiresApproval ? ", aguardando aprovação Pedro" : ""}.` +
+        (hardRule ? `\nRegra dura disparada: ${hardRule}` : ""),
+      badges,
+    };
   }
-  if (typeof payload.reason === "string" && payload.reason) {
-    return payload.reason as string;
+
+  if (item.event_type === "think_loop.dispatched") {
+    const channel = asString(payload.channel) ?? asString(payload.target);
+    const summary = asString(payload.summary) ?? asString(payload.action);
+    return {
+      title: "Ação despachada",
+      body:
+        (summary ?? "(sem resumo)") +
+        (channel ? `\nCanal/target: ${channel}` : ""),
+      badges,
+    };
   }
-  if (typeof payload.advisor_name === "string" && payload.advisor_name) {
-    return `Consultou ${payload.advisor_name as string}`;
+
+  if (item.event_type === "advisor.consult_requested") {
+    const advisor = asString(payload.advisor_name) ?? "?";
+    const question = asString(payload.question) ?? asString(payload.prompt);
+    return {
+      title: `Consulta ao advisor ${advisor}`,
+      body: question ?? "(sem pergunta no payload)",
+      badges,
+    };
   }
-  if (typeof payload.hit === "string" && payload.hit) {
-    return payload.hit as string;
+
+  if (item.event_type === "reflexion.critique_generated") {
+    const action = asString(payload.action);
+    const pattern = asString(payload.pattern);
+    const confidence = formatCertainty(payload.confidence);
+    if (confidence) {
+      badges.push({
+        label: `conf ${confidence}`,
+        tone: "bg-slate-50 text-slate-700 border border-slate-200",
+      });
+    }
+    if (action) {
+      badges.push({
+        label: action,
+        tone: "bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-200",
+      });
+    }
+    return {
+      title: "Pattern aprendido pelo Caio",
+      body: pattern ?? "(pattern não disponível neste resumo — abra a tab Reflexion)",
+      badges,
+    };
   }
+
+  // Fallback: dump the payload so the card is not empty.
+  let dump = "(sem payload)";
   try {
-    return JSON.stringify(payload).slice(0, 220);
+    dump = JSON.stringify(payload, null, 2);
   } catch {
-    return "(unparsable payload)";
+    // keep fallback
   }
+  return {
+    title: item.event_type,
+    body: dump,
+    badges,
+  };
 }
 
 function levelBadge(item: CaioEventItem): string | null {
@@ -215,6 +381,10 @@ export default function CaioPage() {
   const [pendingDecisions, setPendingDecisions] = useState<Set<string>>(
     () => new Set(),
   );
+  // event_ids whose "ver detalhes" toggle is currently open.
+  const [expandedEvents, setExpandedEvents] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   const [critiquesResponse, setCritiquesResponse] =
     useState<CaioRecentCritiquesResponse | null>(null);
@@ -222,6 +392,18 @@ export default function CaioPage() {
   const [critiquesError, setCritiquesError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>("think_loop");
+
+  const toggleExpanded = useCallback((eventId: string) => {
+    setExpandedEvents((prev) => {
+      const next = new Set(prev);
+      if (next.has(eventId)) {
+        next.delete(eventId);
+      } else {
+        next.add(eventId);
+      }
+      return next;
+    });
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -401,6 +583,17 @@ export default function CaioPage() {
         </TabsList>
 
         <TabsContent value="think_loop">
+          <div className="mb-4 flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+            <Sparkles className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-slate-500" />
+            <span>
+              <span className="font-semibold">mark_only:</span> aprovar/rejeitar
+              aqui registra só no Cockpit DB para você ter histórico das suas
+              decisões. <span className="font-semibold">Não dispara nada</span>{" "}
+              nos pipelines do Caio (#wa-aprovacoes, openclaw, events.sqlite).
+              Para ver o JSON cru de cada evento, use o botão "Ver detalhes".
+            </span>
+          </div>
+
           {statusBanner ? (
             <div className="mb-4 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
               <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
@@ -435,10 +628,12 @@ export default function CaioPage() {
                 const level = levelBadge(item);
                 const decided = item.decision;
                 const pending = pendingDecisions.has(item.event_id);
+                const summary = renderSummary(item);
+                const expanded = expandedEvents.has(item.event_id);
                 return (
                   <Card key={item.event_id}>
                     <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
-                      <div className="flex items-center gap-2 text-sm font-medium">
+                      <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
                         <span
                           className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${badge.tone}`}
                         >
@@ -449,6 +644,14 @@ export default function CaioPage() {
                             {level}
                           </Badge>
                         ) : null}
+                        {summary.badges.map((b, idx) => (
+                          <span
+                            key={`${item.event_id}-badge-${idx}`}
+                            className={`inline-flex items-center rounded px-2 py-0.5 text-xs ${b.tone}`}
+                          >
+                            {b.label}
+                          </span>
+                        ))}
                         {decided ? (
                           <span
                             className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-semibold ${
@@ -476,9 +679,36 @@ export default function CaioPage() {
                       </span>
                     </CardHeader>
                     <CardContent className="pt-2 text-sm text-slate-700">
-                      <p className="whitespace-pre-wrap">
-                        {formatPayloadSummary(item)}
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        {summary.title}
                       </p>
+                      <p className="mt-1 whitespace-pre-wrap">{summary.body}</p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="mt-2 border-slate-200 text-xs text-slate-600 hover:bg-slate-50"
+                        onClick={() => toggleExpanded(item.event_id)}
+                      >
+                        {expanded ? "Esconder detalhes" : "Ver detalhes (JSON)"}
+                      </Button>
+                      {expanded ? (
+                        <pre className="mt-2 overflow-x-auto rounded-md border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-700">
+                          {JSON.stringify(
+                            {
+                              event_id: item.event_id,
+                              event_type: item.event_type,
+                              source: item.source,
+                              producer_id: item.producer_id,
+                              occurred_at: item.occurred_at,
+                              correlation_id: item.correlation_id,
+                              thread_id: item.thread_id,
+                              payload: item.payload,
+                            },
+                            null,
+                            2,
+                          )}
+                        </pre>
+                      ) : null}
                       <div className="mt-3 flex items-center gap-2">
                         <Button
                           size="sm"
