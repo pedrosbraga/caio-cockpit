@@ -19,8 +19,10 @@ class CaioEventDecisionRead(BaseModel):
     decided_at: datetime
     decided_by_user_id: UUID
     note: str | None = None
-    # ``None`` while the approved action is still pending in the real world.
-    # The UI moves cards between "To Do" and "Done" based on this.
+    # Caio-owned lifecycle: ``started_at`` set when Caio picks the work up,
+    # ``completed_at`` set when Caio finishes the real-world action. The UI
+    # routes cards across To Do / In Progress / Done from these timestamps.
+    started_at: datetime | None = None
     completed_at: datetime | None = None
 
 
@@ -75,6 +77,7 @@ class CaioDecisionResponse(BaseModel):
     decided_at: datetime
     decided_by_user_id: UUID
     note: str | None = None
+    started_at: datetime | None = None
     completed_at: datetime | None = None
     # Sanity flag for the UI: confirms the server is in mark_only mode and
     # nothing downstream was dispatched.

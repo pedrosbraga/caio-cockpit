@@ -37,6 +37,7 @@ type CaioEventDecisionRead = {
   decided_at: string;
   decided_by_user_id: string;
   note: string | null;
+  started_at: string | null;
   completed_at: string | null;
 };
 
@@ -65,11 +66,18 @@ type CaioDecisionResponse = {
   decided_at: string;
   decided_by_user_id: string;
   note: string | null;
+  started_at: string | null;
   completed_at: string | null;
   mode: "mark_only";
 };
 
-type StatusBucket = "pending" | "todo" | "done" | "rejected" | "history";
+type StatusBucket =
+  | "pending"
+  | "todo"
+  | "in_progress"
+  | "done"
+  | "rejected"
+  | "history";
 
 type CaioCritiqueItem = {
   id: number;
@@ -631,6 +639,7 @@ export default function CaioPage() {
                           decided_at: fresh.decided_at,
                           decided_by_user_id: fresh.decided_by_user_id,
                           note: fresh.note,
+                          started_at: fresh.started_at,
                           completed_at: fresh.completed_at,
                         },
                       }
@@ -646,57 +655,6 @@ export default function CaioPage() {
             : err instanceof Error
               ? err.message
               : "Failed to mark decision";
-        setErrorMessage(msg);
-      } finally {
-        setPendingDecisions((prev) => {
-          const next = new Set(prev);
-          next.delete(eventId);
-          return next;
-        });
-      }
-    },
-    [],
-  );
-
-  const markComplete = useCallback(
-    async (eventId: string) => {
-      setPendingDecisions((prev) => {
-        const next = new Set(prev);
-        next.add(eventId);
-        return next;
-      });
-      setErrorMessage(null);
-      try {
-        const result = await customFetch<{ data: CaioDecisionResponse }>(
-          `/api/v1/caio/think-loop/decisions/${encodeURIComponent(eventId)}/complete`,
-          { method: "POST" },
-        );
-        const fresh = result.data;
-        setResponse((prev) =>
-          prev
-            ? {
-                ...prev,
-                items: prev.items.map((item) =>
-                  item.event_id === eventId && item.decision
-                    ? {
-                        ...item,
-                        decision: {
-                          ...item.decision,
-                          completed_at: fresh.completed_at,
-                        },
-                      }
-                    : item,
-                ),
-              }
-            : prev,
-        );
-      } catch (err) {
-        const msg =
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : "Failed to mark complete";
         setErrorMessage(msg);
       } finally {
         setPendingDecisions((prev) => {
@@ -785,7 +743,9 @@ export default function CaioPage() {
     if (category === "history") return "history";
     if (!decision) return "pending";
     if (decision.decision === "reject") return "rejected";
-    return decision.completed_at ? "done" : "todo";
+    if (decision.completed_at) return "done";
+    if (decision.started_at) return "in_progress";
+    return "todo";
   }
 
   const categorizedItems = preCategoryItems.map((it) => {
@@ -800,6 +760,9 @@ export default function CaioPage() {
     (it) => it._bucket === "pending",
   );
   const todoItems = categorizedItems.filter((it) => it._bucket === "todo");
+  const inProgressItems = categorizedItems.filter(
+    (it) => it._bucket === "in_progress",
+  );
   const doneItems = categorizedItems.filter((it) => it._bucket === "done");
   const rejectedItems = categorizedItems.filter(
     (it) => it._bucket === "rejected",
@@ -811,6 +774,7 @@ export default function CaioPage() {
   const bucketCounts: Record<StatusBucket, number> = {
     pending: pendingItems.length,
     todo: todoItems.length,
+    in_progress: inProgressItems.length,
     done: doneItems.length,
     rejected: rejectedItems.length,
     history: historyItems.length,
@@ -821,6 +785,8 @@ export default function CaioPage() {
         return pendingItems;
       case "todo":
         return todoItems;
+      case "in_progress":
+        return inProgressItems;
       case "done":
         return doneItems;
       case "rejected":
@@ -931,6 +897,11 @@ export default function CaioPage() {
                   count: bucketCounts.pending,
                 },
                 { key: "todo", label: "To Do", count: bucketCounts.todo },
+                {
+                  key: "in_progress",
+                  label: "In Progress",
+                  count: bucketCounts.in_progress,
+                },
                 { key: "done", label: "Done", count: bucketCounts.done },
                 {
                   key: "rejected",
@@ -1161,21 +1132,6 @@ export default function CaioPage() {
                                   ? "Rejeitar"
                                   : "Discordo"}
                             </Button>
-                            {decided?.decision === "approve" &&
-                            !decided?.completed_at ? (
-                              <Button
-                                size="sm"
-                                variant="primary"
-                                className="bg-indigo-600 text-white hover:bg-indigo-700"
-                                onClick={() => {
-                                  void markComplete(item.event_id);
-                                }}
-                                disabled={pending}
-                              >
-                                <Check className="h-3.5 w-3.5" />
-                                Marcar feito
-                              </Button>
-                            ) : null}
                           </>
                         ) : null}
                         <Button
@@ -1192,7 +1148,18 @@ export default function CaioPage() {
                           </span>
                         ) : decided?.completed_at ? (
                           <span className="text-xs text-emerald-700">
-                            feito em {formatOccurredAt(decided.completed_at)}
+                            Caio terminou em{" "}
+                            {formatOccurredAt(decided.completed_at)}
+                          </span>
+                        ) : decided?.started_at ? (
+                          <span className="text-xs text-indigo-700">
+                            Caio trabalhando desde{" "}
+                            {formatOccurredAt(decided.started_at)}
+                          </span>
+                        ) : decided?.decision === "approve" ? (
+                          <span className="text-xs text-slate-500">
+                            aprovado em {formatOccurredAt(decided.decided_at)}{" "}
+                            · aguardando Caio pegar
                           </span>
                         ) : decided ? (
                           <span className="text-xs text-slate-500">

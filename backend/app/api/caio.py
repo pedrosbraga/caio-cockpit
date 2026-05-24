@@ -97,6 +97,7 @@ def _decision_read(row: CaioEventDecision) -> CaioEventDecisionRead:
         decided_at=row.decided_at,
         decided_by_user_id=row.decided_by_user_id,
         note=row.note,
+        started_at=row.started_at,
         completed_at=row.completed_at,
     )
 
@@ -249,7 +250,73 @@ async def mark_think_loop_decision(
         decided_at=row.decided_at,
         decided_by_user_id=row.decided_by_user_id,
         note=row.note,
+        started_at=row.started_at,
         completed_at=row.completed_at,
+    )
+
+
+@router.post(
+    "/think-loop/decisions/{event_id}/start",
+    response_model=CaioDecisionResponse,
+    summary="Caio reports it picked up an approved action (To Do -> In Progress)",
+    description=(
+        "Called by Caio's runtime (not by Pedro) when it begins working on an "
+        "approved Cockpit decision. Idempotent: re-POSTing for an already-"
+        "started event is a no-op. 409 if no decision exists or the decision "
+        "is not 'approve'. Still mark_only at the Cockpit layer; the actual "
+        "real-world side effect belongs to Caio's own pipelines."
+    ),
+)
+async def start_think_loop_decision(
+    event_id: str,
+    auth: AuthContext = AUTH_CONTEXT_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> CaioDecisionResponse:
+    if auth.user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    existing = (
+        await session.exec(
+            select(CaioEventDecision).where(
+                col(CaioEventDecision.event_id) == event_id,
+            ),
+        )
+    ).one_or_none()
+
+    if existing is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No decision exists for this event_id; approve it first.",
+        )
+    if existing.decision != "approve":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot start: recorded decision is "
+                f"{existing.decision!r}, not 'approve'."
+            ),
+        )
+
+    if existing.started_at is None:
+        existing.started_at = datetime.now(tz=timezone.utc)
+        session.add(existing)
+        await session.commit()
+        await session.refresh(existing)
+
+    logger.info(
+        "caio.decision.started event_id=%s user_id=%s",
+        existing.event_id,
+        existing.decided_by_user_id,
+    )
+
+    return CaioDecisionResponse(
+        event_id=existing.event_id,
+        decision=existing.decision,  # type: ignore[arg-type]
+        decided_at=existing.decided_at,
+        decided_by_user_id=existing.decided_by_user_id,
+        note=existing.note,
+        started_at=existing.started_at,
+        completed_at=existing.completed_at,
     )
 
 
@@ -314,6 +381,7 @@ async def complete_think_loop_decision(
         decided_at=existing.decided_at,
         decided_by_user_id=existing.decided_by_user_id,
         note=existing.note,
+        started_at=existing.started_at,
         completed_at=existing.completed_at,
     )
 
