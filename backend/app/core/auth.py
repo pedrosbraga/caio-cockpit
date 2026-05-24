@@ -42,6 +42,10 @@ if TYPE_CHECKING:
     from clerk_backend_api.models.user import User as ClerkUser
     from sqlmodel.ext.asyncio.session import AsyncSession
 
+    from app.core.cf_access import CFAccessClaims
+
+_CF_ACCESS_HEADER = b"cf-access-jwt-assertion"
+
 logger = get_logger(__name__)
 security = HTTPBearer(auto_error=False)
 SECURITY_DEP = Depends(security)
@@ -447,6 +451,91 @@ async def _resolve_local_auth_context(
     return AuthContext(actor_type="user", user=user)
 
 
+def _single_cf_access_header(request: Request) -> str | None:
+    """Return the CF Access JWT header value iff exactly one is present.
+
+    Raises HTTPException 400 if duplicates (defends against a client smuggling
+    a forged copy alongside Cloudflare's injected header). Case-insensitive on
+    header name as defense-in-depth, even though ASGI specifies lowercased
+    header names.
+    """
+    values: list[str] = []
+    for name, value in request.scope.get("headers", []):
+        if name.lower() == _CF_ACCESS_HEADER:
+            values.append(value.decode("latin-1"))
+    if len(values) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="duplicate_cf_access_header",
+        )
+    return values[0] if values else None
+
+
+async def _get_or_create_cf_access_user(
+    session: AsyncSession, *, claims: CFAccessClaims
+) -> User:
+    """Find or create a User keyed by CF Access sub (stable identifier).
+
+    Reuses the ``clerk_user_id`` column with prefix ``cf-access:`` to avoid
+    schema migration. ``crud.get_or_create`` already handles concurrent-insert
+    races via IntegrityError + re-select internally.
+    """
+    external_id = f"cf-access:{claims.sub}"
+    defaults: dict[str, object | None] = {
+        "email": claims.email,
+        "name": claims.email.split("@")[0] if "@" in claims.email else claims.email,
+    }
+    user, _ = await crud.get_or_create(
+        session,
+        User,
+        clerk_user_id=external_id,
+        defaults=defaults,
+    )
+    if user.email != claims.email:
+        user.email = claims.email
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+    return user
+
+
+async def _resolve_cf_access_context(
+    *,
+    request: Request,
+    session: AsyncSession,
+    required: bool,
+) -> AuthContext | None:
+    """Validate CF Access JWT and resolve to AuthContext.
+
+    Behavior:
+    - No header + required=True → 401
+    - No header + required=False → None
+    - Header present but invalid → ALWAYS raise (even for optional auth) so
+      malformed/forged tokens never look like an anonymous request.
+    """
+    from app.core.cf_access import CFAccessError
+    from app.core.cf_access_verifier import get_cf_access_verifier
+
+    token = _single_cf_access_header(request)
+    if not token:
+        if required:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        return None
+
+    verifier = get_cf_access_verifier()
+    try:
+        claims = await verifier.verify(token)
+    except CFAccessError as exc:
+        logger.info("auth.cf_access.reject reason=%s", exc.reason)
+        raise HTTPException(status_code=exc.status_code) from exc
+
+    user = await _get_or_create_cf_access_user(session, claims=claims)
+    from app.services.organizations import ensure_member_for_user
+
+    await ensure_member_for_user(session, user)
+    return AuthContext(actor_type="user", user=user)
+
+
 def _parse_subject(claims: dict[str, object]) -> str | None:
     payload = ClerkTokenPayload.model_validate(claims)
     return payload.sub
@@ -467,6 +556,16 @@ async def get_auth_context(
         if local_auth is None:  # pragma: no cover
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
         return local_auth
+
+    if settings.auth_mode == AuthMode.CF_ACCESS:
+        cf_auth = await _resolve_cf_access_context(
+            request=request,
+            session=session,
+            required=True,
+        )
+        if cf_auth is None:  # pragma: no cover
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        return cf_auth
 
     request_state = await _authenticate_clerk_request(request)
     if request_state.status != AuthStatus.SIGNED_IN or not isinstance(request_state.payload, dict):
@@ -504,6 +603,13 @@ async def get_auth_context_optional(
         return None
     if settings.auth_mode == AuthMode.LOCAL:
         return await _resolve_local_auth_context(
+            request=request,
+            session=session,
+            required=False,
+        )
+
+    if settings.auth_mode == AuthMode.CF_ACCESS:
+        return await _resolve_cf_access_context(
             request=request,
             session=session,
             required=False,

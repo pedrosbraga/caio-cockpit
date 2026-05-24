@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Self
 from urllib.parse import urlparse
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.auth_mode import AuthMode
@@ -23,6 +24,8 @@ LOCAL_AUTH_TOKEN_PLACEHOLDERS = frozenset(
         "replace-with-strong-random-token",
     },
 )
+COCKPIT_WORKER_TOKEN_MIN_LENGTH = 50
+_TEAM_DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 class Settings(BaseSettings):
@@ -39,7 +42,8 @@ class Settings(BaseSettings):
     environment: str = "dev"
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/openclaw_agency"
 
-    # Auth mode: "clerk" for Clerk JWT auth, "local" for shared bearer token auth.
+    # Auth mode: "clerk" for Clerk JWT auth, "local" for shared bearer token
+    # auth, "cf_access" for Cloudflare Access JWT validation.
     auth_mode: AuthMode
     local_auth_token: str = ""
 
@@ -48,6 +52,39 @@ class Settings(BaseSettings):
     clerk_api_url: str = "https://api.clerk.com"
     clerk_verify_iat: bool = True
     clerk_leeway: float = 10.0
+
+    # Cloudflare Access (used when AUTH_MODE=cf_access)
+    cf_access_team_domain: str = ""
+    cf_access_audience: str = ""
+    cf_access_allowed_emails: str = ""  # comma-separated, case-insensitive
+    cf_access_jwks_cache_ttl_s: int = 3600
+    cf_access_jwks_refresh_cooldown_s: int = 60
+    cf_access_jwks_fetch_timeout_s: float = 3.0
+
+    # Service-to-service token for cockpit_bridge worker calling
+    # /think-loop/decisions/{id}/start and /complete. Required when
+    # AUTH_MODE=cf_access (worker can't obtain a CF Access JWT directly).
+    # Header: X-Cockpit-Worker-Token: <value>
+    cockpit_worker_token: str = ""
+
+    @field_validator("cf_access_team_domain")
+    @classmethod
+    def _validate_team_domain(cls, v: str) -> str:
+        if v and not _TEAM_DOMAIN_RE.fullmatch(v):
+            raise ValueError(
+                "CF_ACCESS_TEAM_DOMAIN must be a Cloudflare team slug "
+                "(lowercase alphanumeric + hyphens, e.g. 'my-team-slug') — "
+                "not a full URL or hostname.",
+            )
+        return v
+
+    @property
+    def cf_access_allowed_emails_set(self) -> frozenset[str]:
+        return frozenset(
+            e.strip().lower()
+            for e in self.cf_access_allowed_emails.split(",")
+            if e.strip()
+        )
 
     cors_origins: str = ""
     base_url: str = ""
@@ -130,6 +167,29 @@ class Settings(BaseSettings):
             ):
                 raise ValueError(
                     "LOCAL_AUTH_TOKEN must be at least 50 characters and non-placeholder when AUTH_MODE=local.",
+                )
+        elif self.auth_mode == AuthMode.CF_ACCESS:
+            if not self.cf_access_team_domain:
+                raise ValueError(
+                    "CF_ACCESS_TEAM_DOMAIN must be set when AUTH_MODE=cf_access.",
+                )
+            if not self.cf_access_audience.strip():
+                raise ValueError(
+                    "CF_ACCESS_AUDIENCE must be set when AUTH_MODE=cf_access.",
+                )
+            if not self.cf_access_allowed_emails_set:
+                raise ValueError(
+                    "CF_ACCESS_ALLOWED_EMAILS must list at least one email "
+                    "when AUTH_MODE=cf_access.",
+                )
+            worker_token = self.cockpit_worker_token.strip()
+            if not worker_token or len(worker_token) < COCKPIT_WORKER_TOKEN_MIN_LENGTH:
+                raise ValueError(
+                    "COCKPIT_WORKER_TOKEN must be at least 50 characters when "
+                    "AUTH_MODE=cf_access. Used by the cockpit_bridge worker "
+                    "to call /think-loop/decisions/{id}/start and /complete. "
+                    "Generate via: python -c 'import secrets; "
+                    "print(secrets.token_urlsafe(48))'",
                 )
 
         base_url = self.base_url.strip()

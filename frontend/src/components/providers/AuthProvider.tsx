@@ -9,16 +9,24 @@ import {
   getLocalAuthToken,
   isLocalAuthMode,
 } from "@/auth/localAuth";
+import { isCfAccessMode } from "@/auth/mode";
 import { LocalAuthLogin } from "@/components/organisms/LocalAuthLogin";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const localMode = isLocalAuthMode();
+  const cfAccessMode = isCfAccessMode();
 
   useEffect(() => {
     if (!localMode) {
       clearLocalAuthToken();
     }
   }, [localMode]);
+
+  // CF Access mode: tunnel handles SSO via magic link cookie, no token paste
+  // and no Clerk provider needed. Render children directly.
+  if (cfAccessMode) {
+    return <>{children}</>;
+  }
 
   if (localMode) {
     if (!getLocalAuthToken()) {

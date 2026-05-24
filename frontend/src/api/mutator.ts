@@ -1,4 +1,5 @@
 import { getLocalAuthToken, isLocalAuthMode } from "@/auth/localAuth";
+import { isCfAccessMode } from "@/auth/mode";
 import { getApiBaseUrl } from "@/lib/api-base";
 
 type ClerkSession = {
@@ -47,16 +48,22 @@ export const customFetch = async <T>(
   if (hasBody && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  if (isLocalAuthMode() && !headers.has("Authorization")) {
-    const token = getLocalAuthToken();
-    if (token) {
-      headers.set("Authorization", `Bearer ${token}`);
+  // CF Access mode: the tunnel injects Cf-Access-Jwt-Assertion and sets its own
+  // httpOnly cookie. The browser must NOT add an Authorization header — that
+  // would only confuse the backend dispatcher (which validates the CF JWT
+  // header). Skip both the local-token and Clerk branches.
+  if (!isCfAccessMode()) {
+    if (isLocalAuthMode() && !headers.has("Authorization")) {
+      const token = getLocalAuthToken();
+      if (token) {
+        headers.set("Authorization", `Bearer ${token}`);
+      }
     }
-  }
-  if (!headers.has("Authorization")) {
-    const token = await resolveClerkToken();
-    if (token) {
-      headers.set("Authorization", `Bearer ${token}`);
+    if (!headers.has("Authorization")) {
+      const token = await resolveClerkToken();
+      if (token) {
+        headers.set("Authorization", `Bearer ${token}`);
+      }
     }
   }
 

@@ -45,6 +45,13 @@ services:
       LOCAL_AUTH_TOKEN: ${LOCAL_AUTH_TOKEN}
       BASE_URL: ${BASE_URL:-http://localhost:8000}
       RQ_REDIS_URL: redis://redis:6379/0
+      # Cloudflare Access (required when AUTH_MODE=cf_access)
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+      CF_ACCESS_AUDIENCE: ${CF_ACCESS_AUDIENCE:-}
+      CF_ACCESS_ALLOWED_EMAILS: ${CF_ACCESS_ALLOWED_EMAILS:-}
+      # Worker token (required when AUTH_MODE=cf_access) for cockpit_bridge
+      # calling /think-loop/decisions/{id}/start and /complete.
+      COCKPIT_WORKER_TOKEN: ${COCKPIT_WORKER_TOKEN:-}
       # Caio read-only bridges (events.sqlite, critiques.sqlite, ...)
       # CAIO_STATE_HOST_DIR points at the host directory containing Caio's
       # state files; we expose it inside the container as /data/caio-state.
@@ -66,7 +73,10 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      # Bind to loopback only so the backend port isn't reachable from the LAN.
+      # cloudflared (CF Tunnel) runs on the same host and reaches it via 127.0.0.1.
+      # In cf_access mode this is defense-in-depth against direct-origin bypass.
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
 
   frontend:
     build:

@@ -21,6 +21,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.auth import AuthContext, get_auth_context
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.worker_auth import get_user_or_worker_auth_context
 from app.db.session import get_session
 from app.models.caio_decisions import CaioEventDecision
 from app.schemas.caio import (
@@ -46,6 +47,11 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/caio", tags=["caio"])
 
 AUTH_CONTEXT_DEP = Depends(get_auth_context)
+# /think-loop/decisions/{id}/start and /complete accept EITHER a CF Access JWT
+# (user) OR an X-Cockpit-Worker-Token header (cockpit_bridge worker). In
+# cf_access mode the worker can't obtain a CF Access JWT, so this widened
+# dependency is the only auth path mounted on those 2 endpoints.
+WORKER_AUTH_DEP = Depends(get_user_or_worker_auth_context)
 SESSION_DEP = Depends(get_session)
 LIMIT_QUERY = Query(default=20, ge=1, le=200)
 
@@ -291,7 +297,7 @@ async def mark_think_loop_decision(
 )
 async def start_think_loop_decision(
     event_id: str,
-    auth: AuthContext = AUTH_CONTEXT_DEP,
+    auth: AuthContext = WORKER_AUTH_DEP,
     session: AsyncSession = SESSION_DEP,
 ) -> CaioDecisionResponse:
     if auth.user is None:
@@ -357,7 +363,7 @@ async def start_think_loop_decision(
 )
 async def complete_think_loop_decision(
     event_id: str,
-    auth: AuthContext = AUTH_CONTEXT_DEP,
+    auth: AuthContext = WORKER_AUTH_DEP,
     session: AsyncSession = SESSION_DEP,
 ) -> CaioDecisionResponse:
     if auth.user is None:
