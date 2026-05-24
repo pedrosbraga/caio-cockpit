@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Flip the running cockpit stack from AUTH_MODE=local to AUTH_MODE=cf_access.
 #
+# Usage:
+#   flip-to-cf-access.sh <AUD>             # AUD from CF dashboard
+#   flip-to-cf-access.sh --from-cloudflared # extract AUD from cloudflared JWT
+#
+# Where to find AUD:
+#   one.dash.cloudflare.com → Zero Trust → Access → Applications →
+#     <cockpit-spike> → Overview → "Application Audience (AUD) Tag"
+#
 # What it does:
-#   1. Triggers cloudflared access login (browser opens — log in once).
-#   2. Reads the JWT and extracts the AUD claim (the per-app audience tag).
-#   3. Updates ~/dev/caio-cockpit/.env with CF_ACCESS_* + COCKPIT_WORKER_TOKEN.
-#   4. Rebuilds + restarts backend & frontend containers.
-#   5. Updates the launchd plist of the cockpit-decision-worker with the new
+#   1. Resolves AUD + TEAM_DOMAIN (from argument or cloudflared JWT).
+#   2. Updates ~/dev/caio-cockpit/.env with CF_ACCESS_* + COCKPIT_WORKER_TOKEN.
+#   3. Rebuilds + restarts backend & frontend containers.
+#   4. Updates the launchd plist of the cockpit-decision-worker with the new
 #      COCKPIT_WORKER_TOKEN and reloads it.
-#   6. Prints a smoke test you can run from the iPhone.
+#   5. Prints a smoke test you can run from the iPhone.
 #
 # Idempotent: re-run safely.
 
@@ -19,23 +26,26 @@ COMPOSE_DIR="$HOME/dev/caio-cockpit"
 WORKER_PLIST="$HOME/Library/LaunchAgents/ai.openclaw.cockpit-decision-worker.plist"
 ALLOWED_EMAILS="${CF_ACCESS_ALLOWED_EMAILS:-pedro.braga.2007@gmail.com}"
 APP_URL="https://cockpit-spike.ocaio.app"
+TEAM_DOMAIN_DEFAULT="falling-haze-5df4"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "ERROR: $ENV_FILE not found" >&2
   exit 1
 fi
 
-# --- 1 + 2: get AUD from a CF Access JWT --------------------------------------
+# --- 1: resolve AUD + TEAM_DOMAIN --------------------------------------------
 
-echo "→ Triggering cloudflared access login (browser opens; log in once)…"
-cloudflared access login "$APP_URL/" >/dev/null 2>&1 || {
-  echo "WARN: cloudflared login returned non-zero; will try to read existing token anyway."
-}
+if [[ $# -lt 1 ]]; then
+  cat >&2 <<USAGE
+Usage:
+  $0 <AUD>                  # paste AUD from CF Zero Trust dashboard
+  $0 --from-cloudflared     # try to extract from cloudflared local token
 
-TOKEN="$(cloudflared access token --app "$APP_URL/" 2>/dev/null | tr -d '\n')"
-if [[ -z "$TOKEN" ]]; then
-  echo "ERROR: could not obtain CF Access token. Run 'cloudflared access login $APP_URL/' manually first." >&2
-  exit 2
+Find AUD at:
+  one.dash.cloudflare.com → Zero Trust → Access → Applications →
+    cockpit-spike → Overview → "Application Audience (AUD) Tag"
+USAGE
+  exit 1
 fi
 
 decode_b64url() {
@@ -46,19 +56,34 @@ decode_b64url() {
   printf '%s' "$p" | base64 -D 2>/dev/null || printf '%s' "$p" | base64 -d
 }
 
-PAYLOAD_B64="$(printf '%s' "$TOKEN" | cut -d. -f2)"
-PAYLOAD_JSON="$(decode_b64url "$PAYLOAD_B64")"
-AUD="$(printf '%s' "$PAYLOAD_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d["aud"]; print(a[0] if isinstance(a,list) else a)')"
-TEAM_DOMAIN="$(printf '%s' "$PAYLOAD_JSON" | python3 -c 'import json,sys,urllib.parse as u; d=json.load(sys.stdin); h=u.urlparse(d["iss"]).hostname; print(h.split(".",1)[0])')"
+if [[ "$1" == "--from-cloudflared" ]]; then
+  echo "→ Reading cloudflared token (run 'cloudflared access login $APP_URL/' first if missing)…"
+  TOKEN="$(cloudflared access token --app "$APP_URL/" 2>/dev/null | tr -d '\n')"
+  if [[ -z "$TOKEN" ]]; then
+    echo "ERROR: no cloudflared token. Run 'cloudflared access login $APP_URL/' and complete the email auth." >&2
+    exit 2
+  fi
+  PAYLOAD_JSON="$(decode_b64url "$(printf '%s' "$TOKEN" | cut -d. -f2)")"
+  AUD="$(printf '%s' "$PAYLOAD_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin); a=d["aud"]; print(a[0] if isinstance(a,list) else a)')"
+  TEAM_DOMAIN="$(printf '%s' "$PAYLOAD_JSON" | python3 -c 'import json,sys,urllib.parse as u; d=json.load(sys.stdin); h=u.urlparse(d["iss"]).hostname; print(h.split(".",1)[0])')"
+else
+  AUD="$1"
+  TEAM_DOMAIN="${2:-$TEAM_DOMAIN_DEFAULT}"
+fi
+
+# Sanity: AUD is typically a 64-hex-char string
+if ! [[ "$AUD" =~ ^[a-f0-9]{32,}$ ]]; then
+  echo "WARN: AUD '$AUD' doesn't look like a CF Access audience tag (expected hex). Proceeding anyway." >&2
+fi
 
 if [[ -z "$AUD" || -z "$TEAM_DOMAIN" ]]; then
-  echo "ERROR: parsed empty AUD ('$AUD') or team_domain ('$TEAM_DOMAIN'). Payload: $PAYLOAD_JSON" >&2
+  echo "ERROR: empty AUD or TEAM_DOMAIN" >&2
   exit 3
 fi
 echo "  ✓ team_domain=$TEAM_DOMAIN"
 echo "  ✓ aud=$AUD"
 
-# --- 3: update .env -----------------------------------------------------------
+# --- 2: update .env -----------------------------------------------------------
 
 # Generate worker token if not already set in .env
 if ! grep -q '^COCKPIT_WORKER_TOKEN=.\{50,\}' "$ENV_FILE"; then
@@ -90,7 +115,7 @@ upsert_env COCKPIT_WORKER_TOKEN "$WORKER_TOKEN"
 
 echo "  ✓ .env updated (AUTH_MODE=cf_access, CF_ACCESS_*, COCKPIT_WORKER_TOKEN)"
 
-# --- 4: rebuild + restart stack ----------------------------------------------
+# --- 3: rebuild + restart stack ----------------------------------------------
 
 echo "→ Restarting backend + frontend containers…"
 (
@@ -99,7 +124,7 @@ echo "→ Restarting backend + frontend containers…"
 ) >/dev/null
 echo "  ✓ containers up"
 
-# --- 5: update worker plist + reload -----------------------------------------
+# --- 4: update worker plist + reload -----------------------------------------
 
 if [[ -f "$WORKER_PLIST" ]]; then
   /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:COCKPIT_WORKER_TOKEN $WORKER_TOKEN" "$WORKER_PLIST" 2>/dev/null \
@@ -111,7 +136,7 @@ else
   echo "  ⚠ worker plist not found at $WORKER_PLIST — skip worker reload"
 fi
 
-# --- 6: smoke ----------------------------------------------------------------
+# --- 5: smoke ----------------------------------------------------------------
 
 cat <<EOF
 
