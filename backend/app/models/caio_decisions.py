@@ -37,3 +37,7 @@ class CaioEventDecision(QueryModel, table=True):
     decided_at: datetime = Field(default_factory=utcnow)
     decided_by_user_id: UUID = Field(foreign_key="users.id", index=True)
     note: str | None = None
+    # Set when Pedro marks the approved action as actually done in the real
+    # world (e.g. he wrote the message, ran the change, etc). Only meaningful
+    # when ``decision == "approve"``. ``None`` means "still in the To Do bucket".
+    completed_at: datetime | None = None

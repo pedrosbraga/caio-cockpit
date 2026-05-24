@@ -37,6 +37,7 @@ type CaioEventDecisionRead = {
   decided_at: string;
   decided_by_user_id: string;
   note: string | null;
+  completed_at: string | null;
 };
 
 type CaioEventItem = {
@@ -64,8 +65,11 @@ type CaioDecisionResponse = {
   decided_at: string;
   decided_by_user_id: string;
   note: string | null;
+  completed_at: string | null;
   mode: "mark_only";
 };
+
+type StatusBucket = "pending" | "todo" | "done" | "rejected" | "history";
 
 type CaioCritiqueItem = {
   id: number;
@@ -537,7 +541,7 @@ export default function CaioPage() {
   const [critiquesError, setCritiquesError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>("think_loop");
-  const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [activeBucket, setActiveBucket] = useState<StatusBucket>("pending");
 
   const toggleExpanded = useCallback((eventId: string) => {
     setExpandedEvents((prev) => {
@@ -627,6 +631,7 @@ export default function CaioPage() {
                           decided_at: fresh.decided_at,
                           decided_by_user_id: fresh.decided_by_user_id,
                           note: fresh.note,
+                          completed_at: fresh.completed_at,
                         },
                       }
                     : item,
@@ -641,6 +646,57 @@ export default function CaioPage() {
             : err instanceof Error
               ? err.message
               : "Failed to mark decision";
+        setErrorMessage(msg);
+      } finally {
+        setPendingDecisions((prev) => {
+          const next = new Set(prev);
+          next.delete(eventId);
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const markComplete = useCallback(
+    async (eventId: string) => {
+      setPendingDecisions((prev) => {
+        const next = new Set(prev);
+        next.add(eventId);
+        return next;
+      });
+      setErrorMessage(null);
+      try {
+        const result = await customFetch<{ data: CaioDecisionResponse }>(
+          `/api/v1/caio/think-loop/decisions/${encodeURIComponent(eventId)}/complete`,
+          { method: "POST" },
+        );
+        const fresh = result.data;
+        setResponse((prev) =>
+          prev
+            ? {
+                ...prev,
+                items: prev.items.map((item) =>
+                  item.event_id === eventId && item.decision
+                    ? {
+                        ...item,
+                        decision: {
+                          ...item.decision,
+                          completed_at: fresh.completed_at,
+                        },
+                      }
+                    : item,
+                ),
+              }
+            : prev,
+        );
+      } catch (err) {
+        const msg =
+          err instanceof ApiError
+            ? `${err.status}: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : "Failed to mark complete";
         setErrorMessage(msg);
       } finally {
         setPendingDecisions((prev) => {
@@ -679,6 +735,7 @@ export default function CaioPage() {
   type DecoratedItem = CaioEventItem & {
     _pairedProposal?: CaioEventItem;
     _category?: EventCategory;
+    _bucket?: StatusBucket;
   };
   const items: DecoratedItem[] = [];
   const consumedProposalIds = new Set<string>();
@@ -719,24 +776,59 @@ export default function CaioPage() {
   );
 
   // Categorize each surviving item and split into buckets so the UI can
-  // surface "needs Pedro" cards on top and hide history behind a toggle.
-  const categorizedItems = preCategoryItems.map((it) => ({
-    ...it,
-    _category: categorize(it, it._pairedProposal),
-  }));
-  const pedroItems = categorizedItems.filter((it) => it._category === "pedro");
-  const blockedItems = categorizedItems.filter(
-    (it) => it._category === "blocked",
+  // route each card into the right Pendente / To Do / Done / Rejected /
+  // Histórico sub-pill.
+  function bucketOf(
+    decision: CaioEventDecisionRead | null,
+    category: EventCategory,
+  ): StatusBucket {
+    if (category === "history") return "history";
+    if (!decision) return "pending";
+    if (decision.decision === "reject") return "rejected";
+    return decision.completed_at ? "done" : "todo";
+  }
+
+  const categorizedItems = preCategoryItems.map((it) => {
+    const cat = categorize(it, it._pairedProposal);
+    return {
+      ...it,
+      _category: cat,
+      _bucket: bucketOf(it.decision, cat),
+    };
+  });
+  const pendingItems = categorizedItems.filter(
+    (it) => it._bucket === "pending",
+  );
+  const todoItems = categorizedItems.filter((it) => it._bucket === "todo");
+  const doneItems = categorizedItems.filter((it) => it._bucket === "done");
+  const rejectedItems = categorizedItems.filter(
+    (it) => it._bucket === "rejected",
   );
   const historyItems = categorizedItems.filter(
-    (it) => it._category === "history",
+    (it) => it._bucket === "history",
   );
-  const visibleItems = [
-    ...pedroItems,
-    ...blockedItems,
-    ...(showHistory ? historyItems : []),
-  ];
-  const renderedItems = visibleItems;
+
+  const bucketCounts: Record<StatusBucket, number> = {
+    pending: pendingItems.length,
+    todo: todoItems.length,
+    done: doneItems.length,
+    rejected: rejectedItems.length,
+    history: historyItems.length,
+  };
+  const renderedItems = (() => {
+    switch (activeBucket) {
+      case "pending":
+        return pendingItems;
+      case "todo":
+        return todoItems;
+      case "done":
+        return doneItems;
+      case "rejected":
+        return rejectedItems;
+      case "history":
+        return historyItems;
+    }
+  })();
 
   const statusBanner =
     response && response.status !== "ok"
@@ -830,20 +922,42 @@ export default function CaioPage() {
             </ul>
           </div>
 
-          <div className="mb-3 flex flex-wrap items-center gap-3 text-xs text-slate-600">
-            <span>
-              🟢 <strong>{pedroItems.length}</strong> aguardando você ·
-              🔴 <strong>{blockedItems.length}</strong> bloqueado ·
-              📜 <strong>{historyItems.length}</strong> histórico
-            </span>
-            <Button
-              size="sm"
-              variant="outline"
-              className="border-slate-200 text-xs text-slate-600 hover:bg-slate-50"
-              onClick={() => setShowHistory((v) => !v)}
-            >
-              {showHistory ? "Esconder histórico" : "Ver histórico"}
-            </Button>
+          <div className="mb-3 flex flex-wrap items-center gap-1">
+            {(
+              [
+                {
+                  key: "pending",
+                  label: "Pendente",
+                  count: bucketCounts.pending,
+                },
+                { key: "todo", label: "To Do", count: bucketCounts.todo },
+                { key: "done", label: "Done", count: bucketCounts.done },
+                {
+                  key: "rejected",
+                  label: "Rejected",
+                  count: bucketCounts.rejected,
+                },
+                {
+                  key: "history",
+                  label: "Histórico",
+                  count: bucketCounts.history,
+                },
+              ] as { key: StatusBucket; label: string; count: number }[]
+            ).map((b) => (
+              <Button
+                key={b.key}
+                size="sm"
+                variant={activeBucket === b.key ? "primary" : "outline"}
+                className={
+                  activeBucket === b.key
+                    ? "bg-indigo-600 text-white hover:bg-indigo-700"
+                    : "border-slate-200 text-xs text-slate-600 hover:bg-slate-50"
+                }
+                onClick={() => setActiveBucket(b.key)}
+              >
+                {b.label} ({b.count})
+              </Button>
+            ))}
           </div>
 
           {statusBanner ? (
@@ -1047,6 +1161,21 @@ export default function CaioPage() {
                                   ? "Rejeitar"
                                   : "Discordo"}
                             </Button>
+                            {decided?.decision === "approve" &&
+                            !decided?.completed_at ? (
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                className="bg-indigo-600 text-white hover:bg-indigo-700"
+                                onClick={() => {
+                                  void markComplete(item.event_id);
+                                }}
+                                disabled={pending}
+                              >
+                                <Check className="h-3.5 w-3.5" />
+                                Marcar feito
+                              </Button>
+                            ) : null}
                           </>
                         ) : null}
                         <Button
@@ -1060,6 +1189,10 @@ export default function CaioPage() {
                         {pending ? (
                           <span className="text-xs text-slate-500">
                             salvando…
+                          </span>
+                        ) : decided?.completed_at ? (
+                          <span className="text-xs text-emerald-700">
+                            feito em {formatOccurredAt(decided.completed_at)}
                           </span>
                         ) : decided ? (
                           <span className="text-xs text-slate-500">

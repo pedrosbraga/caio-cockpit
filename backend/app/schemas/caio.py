@@ -19,6 +19,9 @@ class CaioEventDecisionRead(BaseModel):
     decided_at: datetime
     decided_by_user_id: UUID
     note: str | None = None
+    # ``None`` while the approved action is still pending in the real world.
+    # The UI moves cards between "To Do" and "Done" based on this.
+    completed_at: datetime | None = None
 
 
 class CaioEventItem(BaseModel):
@@ -72,6 +75,7 @@ class CaioDecisionResponse(BaseModel):
     decided_at: datetime
     decided_by_user_id: UUID
     note: str | None = None
+    completed_at: datetime | None = None
     # Sanity flag for the UI: confirms the server is in mark_only mode and
     # nothing downstream was dispatched.
     mode: Literal["mark_only"] = "mark_only"
