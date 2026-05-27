@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
   Brain,
   AlertTriangle,
@@ -16,12 +16,11 @@ import { DashboardPageLayout } from "@/components/templates/DashboardPageLayout"
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
+  resolveBookmarkEvaluationCard,
+  type BookmarkSkipDetails,
+} from "@/lib/caio-bookmark-card";
 
 type CaioBridgeStatus =
   | "ok"
@@ -207,6 +206,7 @@ function formatCertainty(value: unknown): string | null {
 }
 
 type RenderedSummary = {
+  variant?: "default" | "bookmark_skip";
   /** Short human title — what this event *is*. */
   title: string;
   /** The free-form body Pedro reads to decide. */
@@ -217,6 +217,7 @@ type RenderedSummary = {
   impact?: string;
   /** Visual tone for the impact badge. */
   impactTone?: string;
+  skipDetails?: BookmarkSkipDetails;
 };
 
 const LEVEL_MEANING: Record<string, string> = {
@@ -261,7 +262,35 @@ function renderSummary(
   pairedProposal?: CaioEventItem,
 ): RenderedSummary {
   const payload = (item.payload ?? {}) as Record<string, unknown>;
+  const proposalPayload = (pairedProposal?.payload ?? {}) as Record<
+    string,
+    unknown
+  >;
   const badges: { label: string; tone: string }[] = [];
+  const bookmarkCard = resolveBookmarkEvaluationCard({
+    eventType: item.event_type,
+    source: item.source,
+    producerId: item.producer_id,
+    payloads: [payload, pairedProposal?.payload],
+    decisionKind: item.decision?.decision ?? null,
+  });
+
+  if (bookmarkCard?.kind === "skip") {
+    badges.push({
+      label: "bookmark",
+      tone: "bg-red-100 text-red-800 border border-red-200",
+    });
+    return {
+      variant: "bookmark_skip",
+      title: "Bookmark descartado",
+      body: "",
+      badges,
+      impact:
+        "Item descartado. Nenhum campo de implementação, PR, branch ou testes é exibido neste card.",
+      impactTone: "bg-red-100 text-red-800",
+      skipDetails: bookmarkCard.details,
+    };
+  }
 
   if (item.event_type === "think_loop.proposal") {
     const action = asString(payload.action) ?? "(proposta sem texto)";
@@ -364,10 +393,6 @@ function renderSummary(
 
     // Build the body — preferring to show the *actual* proposal text when
     // we can pair it with the matching proposal event.
-    const proposalPayload = (pairedProposal?.payload ?? {}) as Record<
-      string,
-      unknown
-    >;
     const proposalText = asString(proposalPayload.action);
     const proposalRationale = asString(proposalPayload.rationale);
 
@@ -379,9 +404,10 @@ function renderSummary(
       `${requiresApproval ? ", aguardando aprovação Pedro" : ""}.` +
       (hardRule ? `\nRegra dura disparada: ${hardRule}` : "");
 
-    const levelLine = level && LEVEL_MEANING[level]
-      ? `${level} significa: ${LEVEL_MEANING[level]}`
-      : "";
+    const levelLine =
+      level && LEVEL_MEANING[level]
+        ? `${level} significa: ${LEVEL_MEANING[level]}`
+        : "";
 
     const bodyParts = [
       proposalText ? `Proposta original do Caio:\n"${proposalText}"` : null,
@@ -453,7 +479,9 @@ function renderSummary(
     }
     return {
       title: "Pattern aprendido pelo Caio",
-      body: pattern ?? "(pattern não disponível neste resumo — abra a tab Reflexion)",
+      body:
+        pattern ??
+        "(pattern não disponível neste resumo — abra a tab Reflexion)",
       badges,
     };
   }
@@ -472,7 +500,7 @@ function renderSummary(
   };
 }
 
-type EventCategory = "pedro" | "blocked" | "history";
+type EventCategory = "pedro" | "blocked" | "skip" | "history";
 
 function categorize(
   item: CaioEventItem,
@@ -483,6 +511,14 @@ function categorize(
     string,
     unknown
   >;
+  const bookmarkCard = resolveBookmarkEvaluationCard({
+    eventType: item.event_type,
+    source: item.source,
+    producerId: item.producer_id,
+    payloads: [payload, pairedProposal?.payload],
+    decisionKind: item.decision?.decision ?? null,
+  });
+  if (bookmarkCard?.kind === "skip") return "skip";
 
   if (item.event_type === "think_loop.policy_decision") {
     const allowed = asBoolean(payload.allowed);
@@ -516,6 +552,11 @@ const CATEGORY_META: Record<
     label: "🔴 Bloqueado",
     tone: "bg-rose-100 text-rose-800",
     ring: "ring-1 ring-rose-200",
+  },
+  skip: {
+    label: "❌ Skip",
+    tone: "bg-red-100 text-red-800",
+    ring: "ring-1 ring-red-200",
   },
   history: {
     label: "📜 Histórico",
@@ -564,6 +605,62 @@ function formatConfidence(value: number | null): string {
   return `${Math.round(value * 100)}%`;
 }
 
+function nullableText(value: string | null): string {
+  return value ?? "null";
+}
+
+function SkipCardField({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div>
+      <dt className="text-xs font-semibold uppercase text-red-700">{label}</dt>
+      <dd className="mt-1 break-words text-sm text-red-950">{children}</dd>
+    </div>
+  );
+}
+
+export function BookmarkSkipFields({
+  details,
+}: {
+  details: BookmarkSkipDetails;
+}) {
+  return (
+    <dl className="mt-3 grid gap-3 rounded-md border border-red-200 bg-red-100/60 p-3">
+      <SkipCardField label="Fonte">
+        {details.sourceUrl ? (
+          <a
+            href={details.sourceUrl}
+            title={details.sourceUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="break-all font-medium text-red-800 underline underline-offset-2 hover:text-red-950"
+          >
+            {details.sourceUrl}
+          </a>
+        ) : (
+          nullableText(details.sourceUrl)
+        )}
+      </SkipCardField>
+      <SkipCardField label="Projeto inferido">
+        {nullableText(details.inferredProject)}
+      </SkipCardField>
+      <SkipCardField label="Complexidade estimada">
+        {nullableText(details.estimatedComplexity)}
+      </SkipCardField>
+      <SkipCardField label="Motivo do descarte">
+        <span className="whitespace-pre-wrap">
+          {nullableText(details.discardReason)}
+        </span>
+      </SkipCardField>
+    </dl>
+  );
+}
+
 export default function CaioPage() {
   const [response, setResponse] = useState<CaioRecentEventsResponse | null>(
     null,
@@ -584,8 +681,9 @@ export default function CaioPage() {
   const [critiquesLoading, setCritiquesLoading] = useState<boolean>(false);
   const [critiquesError, setCritiquesError] = useState<string | null>(null);
 
-  const [waResponse, setWaResponse] =
-    useState<CaioWaApprovalsResponse | null>(null);
+  const [waResponse, setWaResponse] = useState<CaioWaApprovalsResponse | null>(
+    null,
+  );
   const [waLoading, setWaLoading] = useState<boolean>(false);
   const [waError, setWaError] = useState<string | null>(null);
   const [waDays, setWaDays] = useState<number>(7);
@@ -627,30 +725,27 @@ export default function CaioPage() {
     }
   }, []);
 
-  const loadWa = useCallback(
-    async (days: number) => {
-      setWaLoading(true);
-      setWaError(null);
-      try {
-        const result = await customFetch<{ data: CaioWaApprovalsResponse }>(
-          `/api/v1/caio/wa/recent-approvals?days=${days}&min_interactions=1&limit=100`,
-          { method: "GET" },
-        );
-        setWaResponse(result.data);
-      } catch (err) {
-        const msg =
-          err instanceof ApiError
-            ? `${err.status}: ${err.message}`
-            : err instanceof Error
-              ? err.message
-              : "Failed to load WhatsApp stats";
-        setWaError(msg);
-      } finally {
-        setWaLoading(false);
-      }
-    },
-    [],
-  );
+  const loadWa = useCallback(async (days: number) => {
+    setWaLoading(true);
+    setWaError(null);
+    try {
+      const result = await customFetch<{ data: CaioWaApprovalsResponse }>(
+        `/api/v1/caio/wa/recent-approvals?days=${days}&min_interactions=1&limit=100`,
+        { method: "GET" },
+      );
+      setWaResponse(result.data);
+    } catch (err) {
+      const msg =
+        err instanceof ApiError
+          ? `${err.status}: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : "Failed to load WhatsApp stats";
+      setWaError(msg);
+    } finally {
+      setWaLoading(false);
+    }
+  }, []);
 
   const loadCritiques = useCallback(async () => {
     setCritiquesLoading(true);
@@ -816,6 +911,7 @@ export default function CaioPage() {
     decision: CaioEventDecisionRead | null,
     category: EventCategory,
   ): StatusBucket {
+    if (category === "skip") return "rejected";
     if (category === "history") return "history";
     if (!decision) return "pending";
     if (decision.decision === "reject") return "rejected";
@@ -965,9 +1061,9 @@ export default function CaioPage() {
                   📜 cinza
                 </span>
                 <span>
-                  Histórico do que Caio já fez sozinho (escondido por
-                  padrão). Concordo/Discordo aqui só vira feedback
-                  retrospectivo, não muda nada agora.
+                  Histórico do que Caio já fez sozinho (escondido por padrão).
+                  Concordo/Discordo aqui só vira feedback retrospectivo, não
+                  muda nada agora.
                 </span>
               </li>
             </ul>
@@ -1055,10 +1151,13 @@ export default function CaioPage() {
                 const category: EventCategory = item._category ?? "history";
                 const categoryMeta = CATEGORY_META[category];
                 const isHistory = category === "history";
+                const isSkipCard = summary.variant === "bookmark_skip";
                 return (
                   <Card
                     key={item.event_id}
-                    className={`${categoryMeta.ring} ${isHistory ? "opacity-80" : ""}`}
+                    className={`${categoryMeta.ring} ${
+                      isHistory ? "opacity-80" : ""
+                    } ${isSkipCard ? "border border-red-200 !bg-red-50" : ""}`}
                   >
                     <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
                       <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
@@ -1112,10 +1211,24 @@ export default function CaioPage() {
                       </span>
                     </CardHeader>
                     <CardContent className="pt-2 text-sm text-slate-700">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        {summary.title}
-                      </p>
-                      <p className="mt-1 whitespace-pre-wrap">{summary.body}</p>
+                      {isSkipCard && summary.skipDetails ? (
+                        <>
+                          <p className="flex items-center gap-1.5 text-xs font-semibold uppercase text-red-700">
+                            <span aria-hidden="true">❌</span>
+                            {summary.title}
+                          </p>
+                          <BookmarkSkipFields details={summary.skipDetails} />
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            {summary.title}
+                          </p>
+                          <p className="mt-1 whitespace-pre-wrap">
+                            {summary.body}
+                          </p>
+                        </>
+                      )}
                       {summary.impact ? (
                         <div
                           className={`mt-3 rounded-md border border-slate-200 p-2 text-xs ${
@@ -1135,17 +1248,22 @@ export default function CaioPage() {
                           Sua decisão aqui é registrada e usada pelo Reflexion
                           semanal para ajustar a política do Caio.
                         </p>
+                      ) : category === "skip" ? (
+                        <p className="mt-3 text-xs font-semibold text-red-700">
+                          Descartado pelo avaliador de bookmarks. Sem decisão
+                          operacional sua a tomar aqui.
+                        </p>
                       ) : category === "blocked" ? (
                         <p className="mt-3 text-xs font-semibold text-rose-700">
-                          Bloqueado pela política — Caio não executou nada.
-                          Sem decisão sua a tomar aqui (apenas ciência).
+                          Bloqueado pela política — Caio não executou nada. Sem
+                          decisão sua a tomar aqui (apenas ciência).
                         </p>
                       ) : (
                         <p className="mt-3 text-xs text-slate-500">
-                          Caio já decidiu sozinho (auto-executou em modo
-                          shadow ou ignorou). Os botões abaixo são apenas
-                          marcador retrospectivo: dão sinal pro Reflexion
-                          (loop semanal) se você concorda com a decisão dele.
+                          Caio já decidiu sozinho (auto-executou em modo shadow
+                          ou ignorou). Os botões abaixo são apenas marcador
+                          retrospectivo: dão sinal pro Reflexion (loop semanal)
+                          se você concorda com a decisão dele.
                         </p>
                       )}
                       {expanded ? (
@@ -1175,7 +1293,8 @@ export default function CaioPage() {
                             const guildId =
                               process.env.NEXT_PUBLIC_DISCORD_GUILD_ID ?? "@me";
                             const url =
-                              decided.discord_channel_id && decided.discord_message_id
+                              decided.discord_channel_id &&
+                              decided.discord_message_id
                                 ? `https://discord.com/channels/${guildId}/${decided.discord_channel_id}/${decided.discord_message_id}`
                                 : null;
                             const label =
@@ -1194,7 +1313,9 @@ export default function CaioPage() {
                                   <XIcon className="h-3.5 w-3.5" />
                                 )}
                                 {label}
-                                <span className="ml-1 text-xs opacity-70">↗</span>
+                                <span className="ml-1 text-xs opacity-70">
+                                  ↗
+                                </span>
                               </>
                             );
                             return url ? (
@@ -1214,7 +1335,7 @@ export default function CaioPage() {
                               </span>
                             );
                           })()
-                        ) : category !== "blocked" ? (
+                        ) : category !== "blocked" && category !== "skip" ? (
                           <>
                             <Button
                               size="sm"
@@ -1272,7 +1393,9 @@ export default function CaioPage() {
                           className="border-slate-200 text-xs text-slate-600 hover:bg-slate-50"
                           onClick={() => toggleExpanded(item.event_id)}
                         >
-                          {expanded ? "Esconder detalhes" : "Ver detalhes (JSON)"}
+                          {expanded
+                            ? "Esconder detalhes"
+                            : "Ver detalhes (JSON)"}
                         </Button>
                         {pending ? (
                           <span className="text-xs text-slate-500">
@@ -1290,8 +1413,8 @@ export default function CaioPage() {
                           </span>
                         ) : decided?.decision === "approve" ? (
                           <span className="text-xs text-slate-500">
-                            aprovado em {formatOccurredAt(decided.decided_at)}{" "}
-                            · aguardando Caio pegar
+                            aprovado em {formatOccurredAt(decided.decided_at)} ·
+                            aguardando Caio pegar
                           </span>
                         ) : decided ? (
                           <span className="text-xs text-slate-500">
@@ -1327,8 +1450,8 @@ export default function CaioPage() {
           ) : critiqueItems.length === 0 ? (
             <Card>
               <CardContent className="py-6 text-sm text-slate-500">
-                Nenhum critique nos últimos 30 dias. Reflexion roda aos
-                domingos 18h (SP).
+                Nenhum critique nos últimos 30 dias. Reflexion roda aos domingos
+                18h (SP).
                 {critiquesResponse
                   ? ` (status=${critiquesResponse.status}, latência=${critiquesResponse.latency_ms}ms)`
                   : ""}
